@@ -64,7 +64,8 @@ function mapGitHubPullRequest(ghpr) {
 	return pullRequest.create(repoBranch.create(ghpr.base.repo.owner.login, ghpr.base.repo.name, ghpr.base.ref),
 		repoBranch.create(ghpr.head.repo.owner.login, ghpr.head.repo.name, ghpr.head.ref),
 		ghpr.number,
-		`PR${ghpr.number}: ${ghpr.title}`);
+		`PR${ghpr.number}: ${ghpr.title}`,
+		ghpr.mergeCommitSha);
 }
 
 function getGitHubPullRequestId(ghpr) {
@@ -146,10 +147,9 @@ function fetchGitHubPullRequests(buildData) {
 
 /**
  * Creates a new commit in the Build repo that updates all submodules affected by this pull request.
- * Returns a Promise for `{ newCommit, buildBranchName, submoduleBranches }` where:
+ * Returns a Promise for `{ newCommit, buildBranchName }` where:
  * - `newCommit` is a GitHub Git Commit JSON object for the new commit in the Build repo
  * - `buildBranchName` is a unique branch name in the Build repo that `newCommit` is the HEAD of
- * - `submoduleBranches` is an array of repoBranch objects for each submodule updated in the build
  */
 function createNewCommit(buildData) {
 	// use a unique branch name so that the build server has a permanent ref that won't have been
@@ -157,43 +157,14 @@ function createNewCommit(buildData) {
 	const buildBranchName = `lprb-${buildData.config.repo.branch}-${buildData.pullRequests[0].number}-${uniqueSuffix}`;
 	uniqueSuffix++;
 
-	return Promise.all(buildData.pullRequests.map((pr, index) => {
-		// create a merge commit for each submodule that has a PR involved in this build
-		const oldSubmodule = `git@git:${pr.base.user}/${pr.base.repo}.git`;
-		const newSubmodule = `git@git:${pr.head.user}/${pr.head.repo}.git`;
+	return Promise.all(buildData.pullRequests.map(pr => {
 		const treeItem = buildData.headTree.tree.filter(x => x.mode === '160000' && x.path === pr.base.repo)[0];
 		if (treeItem) {
-			const githubBase = github.repos(pr.base.user, pr.base.repo);
-			const prHeadSha = buildData.gitHubPullRequests[index].head.sha;		
-			return githubBase.git.refs('heads', pr.base.branch).fetch()
-				.then(ref => ref.object.sha)
-				.then(headSha => moveBranch(githubBase, buildBranchName, headSha)
-					.then(() => {
-						log.info(`Merging ${prHeadSha.substr(0, 8)} into ${buildBranchName} in ${pr.base.user}/${pr.base.repo}`);
-						return githubBase.merges.create({
-							base: buildBranchName,
-							head: prHeadSha,
-							commit_message: buildData.pullRequests[0].title
-						});
-					}))
-				.then(merge => {
-					log.info(`Merged ${prHeadSha.substr(0, 8)} into ${pr.base.user}/${pr.base.repo}/${buildBranchName}: SHA is ${merge.sha}`);
-					return {
-						user: pr.base.user,
-						repo: pr.base.repo,
-						treeItem: Object.assign(treeItem, { sha: merge.sha })
-					};
-				}, e => {
-					log.error(`Couldn't merge ${prHeadSha.substr(0, 8)} into ${pr.base.user}/${pr.base.repo}/${buildBranchName}: ${e}`);
-					// fall back to building with PR's commit instead of merge result
-					return {
-						user: pr.base.user,
-						repo: pr.base.repo,
-						treeItem: Object.assign(treeItem, { sha: prHeadSha }),
-						oldSubmodule,
-						newSubmodule
-					};
-				});
+			return Promise.resolve({
+				user: pr.base.user,
+				repo: pr.base.repo,
+				treeItem: Object.assign(treeItem, { sha: pr.mergeCommitSha })
+			});
 		} else {
 			log.debug(`Submodule ${pr.base.repo} not found; skipping`);
 			return Promise.resolve(null);
@@ -231,8 +202,7 @@ function createNewCommit(buildData) {
 					return moveBranch(buildData.github, buildBranchName, newCommit.sha)
 						.then(() => ({
 							newCommit,
-							buildBranchName,
-							submoduleBranches: submoduleTreeItems.map(x => repoBranch.create(x.user, x.repo, buildBranchName))
+							buildBranchName
 						}));
 				});
 		});
@@ -286,7 +256,6 @@ function buildPullRequest(prId) {
 	 * 	gitHubPullRequests : an array of GitHub Pull Request objects, one for the tip of each item in pullRequests (above)
 	 * 	newCommit : a GitHub Git Commit object for the new commit in the Build repo
 	 * 	buildBranchName : the new branch name created in the Build repo for newCommit
-	 * 	submoduleBranches : an array of repoBranch objects for each submodule updated by the build
 	 */
 	// set the config, github and pullRequests properties 
 	let buildDatas = configsToBuild
@@ -409,10 +378,6 @@ jenkinsNotifications
 			x.job.build.full_url);
 		x.buildData.github.git.refs(`heads/${x.buildData.buildBranchName}`).remove()
 			.then(success => log.debug(`Branch ${x.buildData.config.repo.user}/${x.buildData.config.repo.repo}/${x.buildData.buildBranchName} was ${success ? '' : 'not '}deleted`));
-		for (const sb of x.buildData.submoduleBranches) {
-			github.repos(sb.user, sb.repo).git.refs(`heads/${sb.branch}`).remove()
-				.then(success => log.debug(`Branch ${sb.user}/${sb.repo}/${sb.branch} was ${success ? '' : 'not '}deleted`));
-		}
 	}, e => log.error(e));
 
 let started = false;

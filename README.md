@@ -16,7 +16,14 @@ Add a Notification Endpoint:
 
 Set "This build is parameterized". Add a string parameter named `sha1` (no default value).
 
-Under Source Code Management > Git, set "Branches to build:" to `${sha1}`
+Under Source Code Management > Git, set "Branches to build:" to `${sha1}`. Remove "Advanced sub-module behaviors".
+
+Insert an "Execute shell" step as the first build step:
+
+```
+git submodule foreach git fetch origin +refs/pull/*:refs/remotes/origin/pull/*
+git submodule update --init
+```
 
 Review any post-build steps left over from copying the existing Jenkins job, and delete
 the unnecessary ones (which may be all of them). 
